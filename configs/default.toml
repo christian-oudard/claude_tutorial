@@ -1,0 +1,33 @@
+mass = 1.0
+g = 9.81
+conservative = false
+deflection = true
+buckling = true
+name = "default_1kg"
+
+[loads]
+F = 1.0
+P = 0.0
+T = 0.0
+
+[material]
+rho = 7850.0
+E = 200000000000.0
+sigma_y = 250000000.0
+
+[soil]
+q_allow = 150000.0
+
+[safety]
+buckling_SF = 2.0
+defl_ratio = 0.02
+
+[solver]
+seed = 12345
+multistart = 48
+maxiter = 300
+ftol = 1e-09
+feas_tol = 0.0001
+pdelta_iters = 4
+r_min = 0.0001
+t_min = 0.0002
