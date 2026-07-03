@@ -57,6 +57,52 @@ def evaluation_to_dict(ev: PostEvaluation) -> dict[str, Any]:
     }
 
 
+def profile_evaluation_to_dict(ev) -> dict[str, Any]:
+    return {
+        "geometry": {
+            "H": ev.H,
+            "control_xi": list(map(float, ev.xi)),
+            "control_radii": list(map(float, ev.radii)),
+            "D": ev.D,
+            "t": ev.t,
+            "volume": ev.volume,
+            "shaft_volume": ev.shaft_volume,
+        },
+        "response": {
+            "weight": ev.weight,
+            "buckling_lambda": ev.lam_buckle,
+            "tip_deflection": ev.delta_tip,
+            "sigma_max_util": ev.sigma_max,
+            "sigma_pnorm_util": ev.sigma_pnorm,
+        },
+        "overturning": {
+            "model": ev.overturn.model,
+            "M_applied": ev.overturn.M_applied,
+            "M_cap": ev.overturn.M_cap,
+            "kern_M_cap": ev.overturn_kern.M_cap,
+        },
+        "margins": ev.margins,
+        "active_set": ev.active_set(),
+        "feasible": ev.feasible,
+        "min_margin": ev.min_margin(),
+    }
+
+
+def profile_result_to_dict(res, cfg: PostConfig) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "config": cfg.to_dict(),
+        "solver": {
+            "success": res.success,
+            "message": res.message,
+            "H": res.H,
+            "model": "profile",
+        },
+    }
+    if res.evaluation is not None:
+        out["result"] = profile_evaluation_to_dict(res.evaluation)
+    return out
+
+
 def result_to_dict(res: OptimizeResult, cfg: PostConfig) -> dict[str, Any]:
     out: dict[str, Any] = {
         "config": cfg.to_dict(),

@@ -57,6 +57,16 @@ class Solver:
 
 
 @dataclass(frozen=True)
+class Profile:
+    """Settings for the M2 free-profile ``r(z)`` model."""
+
+    n_control: int = 20  # number of radius control points
+    nel: int = 40  # beam FEM elements
+    p_norm: int = 12  # aggregation exponent for the yield constraint
+    multistart: int = 24  # random starts for the profile optimizer
+
+
+@dataclass(frozen=True)
 class PostConfig:
     """Top-level configuration.
 
@@ -74,9 +84,11 @@ class PostConfig:
     soil: Soil = field(default_factory=Soil)
     safety: Safety = field(default_factory=Safety)
     solver: Solver = field(default_factory=Solver)
+    profile: Profile = field(default_factory=Profile)
     conservative: bool = False  # kern overturning model + report both
     deflection: bool = True  # enforce the P-delta deflection constraint
     buckling: bool = True  # enforce the buckling eigenvalue constraint
+    model: str = "two_cylinder"  # "two_cylinder" (M1) or "profile" (M2)
     name: str = "post"
 
     # -- derived -----------------------------------------------------------
@@ -97,6 +109,7 @@ class PostConfig:
             "soil": Soil,
             "safety": Safety,
             "solver": Solver,
+            "profile": Profile,
         }
         kwargs: dict = {}
         for f in fields(cls):
