@@ -55,6 +55,19 @@ def test_optimize_feasible_with_buckling_and_deflection():
     assert ev.min_margin() >= -cfg.solver.feas_tol
 
 
+def test_high_F_second_order_moment_regression():
+    # Regression: with buckling+deflection on, the second-order moment can dip
+    # slightly negative near the tip; the FSD radius solve must size on the
+    # magnitude and not fail its root bracket.
+    cfg = PostConfig(
+        loads=Loads(F=10.0), buckling=True, deflection=True,
+        profile=Profile(n_control=16, nel=32),
+    )
+    res = ProfileOptimizer(cfg).optimize()
+    assert res.success
+    assert res.evaluation.sigma_max <= 1.0 + 1e-2
+
+
 def test_taller_than_two_cylinder_equal_mass():
     # A shaped profile should stand at least as tall as the crude two-cylinder
     # at equal mass and load (same constraints).

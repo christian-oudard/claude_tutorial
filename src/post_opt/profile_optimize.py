@@ -50,8 +50,12 @@ def _fully_stressed_radius(M: float, N: float, sigma_y: float, r_min: float) -> 
     """Solve ``sigma_y = N/(pi r^2) + 4 M/(pi r^3)`` for the section radius.
 
     ``f(r) = sigma_y pi r^3 - N r - 4 M`` is monotone increasing for ``r > 0``
-    with ``f(0) < 0``, so the positive root is unique.
+    with ``f(0) <= 0``, so the positive root is unique.  ``M`` and ``N`` are
+    taken as magnitudes (worst-fibre stress = |axial| + |bending|); the
+    second-order moment can dip slightly negative near the tip.
     """
+    M = abs(M)
+    N = abs(N)
     if M <= 0.0 and N <= 0.0:
         return r_min
 
