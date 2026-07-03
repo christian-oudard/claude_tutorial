@@ -49,6 +49,32 @@ human, or an LLM) finds the form; the Go kernel checks it.
   vs the quoted 50–100 µm) are pinned as expected-discrepancy tests in
   both languages — cross-language drift detection.
 
+## Multiscale texture (§7.2 + §3.2)
+
+Two mechanisms carry the "centimeter ripples riding on millimeter
+ripples" texture of a real creek:
+
+- **Spectral cascade** (`wave.Cascade`): three patches (2 m / 0.5 m /
+  0.15 m at 256² each) whose k-windows partition wavenumber space —
+  [0,250) / [250,1000) / [1000,∞) rad/m — down to sub-millimeter cells.
+  The dk factor in the mode amplitudes makes the bands consistent samples
+  of one continuous spectrum; a capillary ripple bump is anchored at the
+  certified crossover k_m (test-pinned). Per-pixel LOD (`SampleLOD`)
+  moves the §6.4 geometry/roughness boundary to the camera: bands whose
+  cells fall below the pixel footprint fade out of the geometric normal
+  and their measured slope variance folds into the GGX roughness —
+  conserving slope energy instead of aliasing it.
+- **Rock-locked stationary waves** (`wave.RockField`): the §3.2 ω = 0
+  solutions. The stationarity condition U·k = ω₀(k) has two roots —
+  the gravity branch (λ ≈ 15.8 cm at 0.5 m/s: the downstream wake
+  trains) and the capillary branch (λ ≈ 1.9 mm: the upstream
+  crescents) — both solved from the same dispersion relation the spec
+  suite certifies, per propagation direction, superposed into a static
+  interference pattern (stationary = zero per-frame cost). Existence is
+  gated by the certified c_min: the tests probe both sides of the
+  threshold and the critical cone angle. This is the coherent,
+  non-Gaussian structure a homogeneous spectral sea cannot produce.
+
 ## The performance half
 
 - `fft/` — in-place radix-2 FFT, goroutine-parallel 2D transform.
@@ -76,7 +102,7 @@ implementation of that shader.
 ## Run
 
 ```
-go test ./...            # certify: 76 test functions, kernel → spec → float
+go test ./...            # certify: 84 test functions, kernel → spec → float
 go run ./cmd/creek       # render frames into ./out, print derived constants
 go test ./wave -bench .  # simulation benchmark
 ```

@@ -46,7 +46,7 @@ func (a Vec3) Cross(b Vec3) Vec3 {
 
 // Scene bundles everything the shader needs.
 type Scene struct {
-	Ocean  *wave.Ocean
+	Ocean  wave.Surface
 	Cam    Camera
 	SunDir Vec3 // toward the sun, unit
 	// AlphaG is the GGX roughness: sqrt(2 · sub-grid slope variance),
@@ -57,22 +57,35 @@ type Scene struct {
 	// mountain water, red absorbed fastest).
 	Atten Vec3
 	Depth float64 // mean bed depth below z=0, m
+
+	// Casc enables per-pixel LOD (SampleLOD) when the surface is a
+	// multiscale cascade; pixAng is the pixel angular size set by Render.
+	Casc   *wave.Cascade
+	pixAng float64
+
+	// RockPos raises bed cobbles under the §3.2 stationary crescents so
+	// the ripples have a visible cause.
+	RockPos [][2]float64
 }
 
 // NewScene wires the §6.4 spectral-cutoff → roughness rule.
-func NewScene(o *wave.Ocean, cam Camera, sun Vec3) *Scene {
-	alpha := math.Sqrt(2 * o.SlopeVarTail)
+func NewScene(o wave.Surface, depth float64, cam Camera, sun Vec3) *Scene {
+	alpha := math.Sqrt(2 * o.SlopeTail())
 	if alpha < 0.02 {
 		alpha = 0.02
 	}
-	return &Scene{
+	sc := &Scene{
 		Ocean:  o,
 		Cam:    cam,
 		SunDir: sun.Norm(),
 		AlphaG: alpha,
-		Atten:  Vec3{0.45, 0.14, 0.08},
-		Depth:  o.P.Depth,
+		Atten:  Vec3{1.1, 0.45, 0.30},
+		Depth:  depth,
 	}
+	if c, ok := o.(*wave.Cascade); ok {
+		sc.Casc = c
+	}
+	return sc
 }
 
 const sunRadiance = 1200.0
@@ -90,10 +103,16 @@ func (s *Scene) sky(d Vec3) Vec3 {
 	return base.Add(Vec3{1, 0.96, 0.88}.Scale(sunRadiance*disk + halo*40))
 }
 
-// bedZ returns bed elevation below the surface: mean depth plus cobbles.
+// bedZ returns bed elevation below the surface: mean depth plus cobbles,
+// plus a boulder under each rock site.
 func (s *Scene) bedZ(x, y float64) float64 {
 	stones := 0.05*fbm(x*6, y*6, 4) + 0.02*fbm(x*23, y*19, 3)
-	return -s.Depth + stones
+	z := -s.Depth + stones
+	for _, r := range s.RockPos {
+		dx, dy := x-r[0], y-r[1]
+		z += 0.185 * math.Exp(-(dx*dx+dy*dy)/(0.07*0.07))
+	}
+	return z
 }
 
 // bedAlbedo is procedural cobble coloring.
@@ -130,7 +149,20 @@ func (s *Scene) Shade(d Vec3) Vec3 {
 		return s.sky(d)
 	}
 
-	_, sx, sy := s.Ocean.Sample(p.X, p.Y)
+	alphaG := s.AlphaG
+	var sx, sy float64
+	if s.Casc != nil {
+		// Per-pixel LOD: the geometry/roughness boundary tracks the pixel
+		// footprint at the hit distance (§6.4 at the camera).
+		dist := p.Sub(s.Cam.Pos).Len()
+		var unres float64
+		_, sx, sy, unres = s.Casc.SampleLOD(p.X, p.Y, dist*s.pixAng)
+		if a := math.Sqrt(2 * unres); a > alphaG {
+			alphaG = a
+		}
+	} else {
+		_, sx, sy = s.Ocean.Sample(p.X, p.Y)
+	}
 	n := Vec3{-sx, -sy, 1}.Norm()
 	v := d.Scale(-1)
 	cosI := clamp01(n.Dot(v))
@@ -152,7 +184,7 @@ func (s *Scene) Shade(d Vec3) Vec3 {
 	h := v.Add(s.SunDir).Norm()
 	spec := sunRadiance * phys.SunSolidAngle() *
 		phys.SchlickR(clamp01(h.Dot(s.SunDir))) *
-		ggxD(n.Dot(h), s.AlphaG) / (4 * math.Max(0.05, cosI))
+		ggxD(n.Dot(h), alphaG) / (4 * math.Max(0.05, cosI))
 
 	// Refracted bed signal with Beer–Lambert attenuation (§6.3).
 	var lt Vec3
@@ -169,7 +201,7 @@ func (s *Scene) Shade(d Vec3) Vec3 {
 		}
 		// Downwelling sky light on the bed, diffusely reflected, attenuated
 		// on the way down and back up (double path, folded into one exp).
-		lt = alb.MulV(trans).Scale(1.15)
+		lt = alb.MulV(trans).Scale(1.35)
 	}
 
 	c := lr.Scale(F).Add(lt.Scale(1 - F))
@@ -190,7 +222,7 @@ func (s *Scene) march(d Vec3) (bool, Vec3) {
 	prev := t
 	prevS := o.Add(d.Scale(t)).Z - s.heightAt(o.Add(d.Scale(t)))
 	for t < tMax {
-		dt := 0.004 + t*0.01
+		dt := 0.0025 + t*0.007
 		t += dt
 		p := o.Add(d.Scale(t))
 		sv := p.Z - s.heightAt(p)
@@ -215,8 +247,7 @@ func (s *Scene) march(d Vec3) (bool, Vec3) {
 }
 
 func (s *Scene) heightAt(p Vec3) float64 {
-	h, _, _ := s.Ocean.Sample(p.X, p.Y)
-	return h
+	return s.Ocean.SampleH(p.X, p.Y)
 }
 
 // Render draws a w×h frame with ss×ss supersampling per pixel, parallel
@@ -229,6 +260,7 @@ func (s *Scene) Render(w, h, ss int) *image.RGBA {
 	}
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	aspect := float64(h) / float64(w)
+	s.pixAng = 2 * s.Cam.TanHalf / float64(w*ss)
 	workers := runtime.GOMAXPROCS(0)
 	rows := make(chan int, h)
 	var wg sync.WaitGroup

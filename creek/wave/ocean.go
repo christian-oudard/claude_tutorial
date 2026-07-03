@@ -24,8 +24,32 @@ type Params struct {
 	Ux, Uy float64 // advecting current for the Doppler term, m/s
 	Cutoff float64 // small-scale spectral cutoff ℓ, m
 	Chop   float64 // choppy displacement λ_c
-	RMS    float64 // target surface-height rms, m
+	RMS    float64 // target surface-height rms, m (0: skip normalization)
 	Seed   uint64
+
+	// Multiscale cascade support (§7.2 one-way nesting, spectral form):
+	// this band owns wavenumbers k ∈ [KLo, KHi); KHi = 0 means unbounded.
+	// Bands with disjoint windows partition k-space, so summing them never
+	// double-counts energy.
+	KLo, KHi float64
+	// CapAmp adds a capillary ripple bump centered at the certified
+	// gravity–capillary crossover k_m = phys.KCross() (§3.1) with log-k
+	// width ~1.1 — the "saturated capillary ripple range" of §5.2, with
+	// its location pinned by the verified layer rather than tuned.
+	CapAmp float64
+	// Spread mixes the |k̂·ŵ|² directional factor toward isotropy
+	// (0 = fully current-aligned, 1 = isotropic); fine turbulence-fed
+	// ripples are less directional than the driven chop.
+	Spread float64
+}
+
+// Surface is what the renderer consumes: a time-steppable heightfield
+// with slopes and a sub-grid slope-variance tail (§6.4).
+type Surface interface {
+	Step(t float64)
+	Sample(x, y float64) (h, sx, sy float64)
+	SampleH(x, y float64) float64
+	SlopeTail() float64
 }
 
 // Ocean holds the precomputed spectrum and per-frame output fields.
@@ -46,6 +70,12 @@ type Ocean struct {
 	// resolve, the shader must carry as roughness. Computed from the same
 	// spectrum by radial quadrature at construction.
 	SlopeVarTail float64
+
+	// SlopeVarGrid is the resolved slope variance of this band, measured
+	// from the synthesized fields — what a renderer must fold into
+	// roughness when its pixel footprint outgrows this band's cells
+	// (per-pixel LOD, §6.4 applied at the camera instead of the grid).
+	SlopeVarGrid float64
 
 	spec, ssx, ssy, sdx, sdy []complex128
 }
@@ -69,17 +99,40 @@ func (r *rng) gauss() float64 {
 	return math.Sqrt(-2*math.Log(u1)) * math.Cos(2*math.Pi*u2)
 }
 
-// phillips is the driving spectrum (§3.3): Phillips form with directional
-// factor along the current and a small-scale cutoff.
-func phillips(kx, ky float64, p Params) float64 {
+// spectrum is the driving spectrum (§3.3): Phillips form with directional
+// factor along the current, an optional capillary bump at the certified
+// crossover k_m, a small-scale cutoff, and the band window [KLo, KHi).
+func spectrum(kx, ky float64, p Params) float64 {
 	k2 := kx*kx + ky*ky
 	if k2 < 1e-12 {
 		return 0
 	}
+	k := math.Sqrt(k2)
+	if k < p.KLo || (p.KHi > 0 && k >= p.KHi) {
+		return 0
+	}
+	// directional factor along the driving current (§3.3: current, not wind)
+	ux, uy := p.Ux, p.Uy
+	um := math.Hypot(ux, uy)
+	if um < 1e-12 {
+		ux, uy, um = 1, 0, 1
+	}
+	dir := (kx*ux + ky*uy) / (k * um)
+	dirF := (1-p.Spread)*dir*dir + p.Spread*0.5
+	return radialSpectrum(k, p) * dirF * 2.0
+}
+
+// radialSpectrum is the angle-averaged spectrum shape (angular mean of the
+// directional factor is 1/2, folded in here so spectrum() and the slope
+// tail integral share one definition).
+func radialSpectrum(k float64, p Params) float64 {
 	lp := p.UDrive * p.UDrive / phys.Grav
-	dir := kx / math.Sqrt(k2) // current direction is +x by convention
-	return math.Exp(-1/(k2*lp*lp)) / (k2 * k2) * dir * dir *
-		math.Exp(-k2*p.Cutoff*p.Cutoff)
+	base := math.Exp(-1/(k*k*lp*lp)) / (k * k * k * k)
+	if p.CapAmp > 0 {
+		l := math.Log(k / phys.KCross())
+		base += p.CapAmp * math.Exp(-l*l/2.42) / (k * k * k * k)
+	}
+	return base * 0.5 * math.Exp(-k*k*p.Cutoff*p.Cutoff)
 }
 
 // NewOcean builds the spectrum, normalizes to the target rms height, and
@@ -126,7 +179,7 @@ func NewOcean(p Params) *Ocean {
 			o.kmag[idx] = k
 			o.omega0[idx] = phys.Omega0(k, p.Depth)
 			o.uk[idx] = p.Ux*kx + p.Uy*ky
-			s := phillips(kx, ky, p)
+			s := spectrum(kx, ky, p)
 			// Nyquist rows/columns are their own -k partner on an even
 			// grid, so the Doppler phase factor (not self-conjugate)
 			// would break surface reality exactly there. The certified
@@ -136,7 +189,10 @@ func NewOcean(p Params) *Ocean {
 			if si == n/2 || sj == n/2 {
 				s = 0
 			}
-			o.h0[idx] = complex(r.gauss(), r.gauss()) * complex(math.Sqrt(s/2), 0)
+			// The dk factor makes bands with different patch sizes
+			// mutually consistent: per-mode variance is S(k)·Δk², so a
+			// cascade needs no per-band retuning.
+			o.h0[idx] = complex(r.gauss(), r.gauss()) * complex(dk*math.Sqrt(s/2), 0)
 		}
 	}
 	// conj(h0(-k)) lookup table; -k index is (n-i)%n, (n-j)%n.
@@ -164,7 +220,16 @@ func NewOcean(p Params) *Ocean {
 
 	o.Step(0)
 	o.SlopeVarTail = o.tailSlopeVariance()
+	o.SlopeVarGrid = o.gridSlopeVariance()
 	return o
+}
+
+func (o *Ocean) gridSlopeVariance() float64 {
+	var v float64
+	for i := range o.Sx {
+		v += o.Sx[i]*o.Sx[i] + o.Sy[i]*o.Sy[i]
+	}
+	return v / float64(len(o.Sx))
 }
 
 // tailSlopeVariance implements the §6.4 rule s² = ∫_{k>k_res} k² S(k) d²k:
@@ -177,17 +242,24 @@ func (o *Ocean) tailSlopeVariance() float64 {
 	kNyq := math.Pi * float64(o.P.N) / o.P.L
 	dk := 2 * math.Pi / o.P.L
 
-	radial := func(k float64) float64 { // unnormalized k²·S̄(k)·2πk integrand
-		lp := o.P.UDrive * o.P.UDrive / phys.Grav
-		s := math.Exp(-1/(k*k*lp*lp)) / math.Pow(k, 4) * 0.5 *
-			math.Exp(-k*k*o.P.Cutoff*o.P.Cutoff)
-		return k * k * s * 2 * math.Pi * k
+	// A band whose window closes below the grid Nyquist is fully resolved;
+	// its unresolved tail belongs to the finer bands of the cascade.
+	if o.P.KHi > 0 && o.P.KHi <= kNyq {
+		return 0
+	}
+
+	radial := func(k float64) float64 { // k²·S̄(k)·2πk integrand
+		return k * k * radialSpectrum(k, o.P) * 2 * math.Pi * k
 	}
 	var resolved, tail float64
-	for k := dk; k < kNyq; k += dk / 4 {
+	for k := math.Max(dk, o.P.KLo); k < kNyq; k += dk / 4 {
 		resolved += radial(k) * dk / 4
 	}
-	for k := kNyq; k < 20*kNyq; k += kNyq / 64 {
+	kEnd := 20 * kNyq
+	if o.P.KHi > 0 && o.P.KHi < kEnd {
+		kEnd = o.P.KHi // the band owns nothing beyond its window
+	}
+	for k := kNyq; k < kEnd; k += kNyq / 64 {
 		tail += radial(k) * kNyq / 64
 	}
 	if resolved == 0 {
@@ -281,6 +353,29 @@ func (o *Ocean) Sample(x, y float64) (h, sx, sy float64) {
 	dy := o.bilinear(o.Dy, x, y)
 	ux, uy := x-dx, y-dy
 	return o.bilinear(o.H, ux, uy), o.bilinear(o.Sx, ux, uy), o.bilinear(o.Sy, ux, uy)
+}
+
+// SampleH returns only the height at world position (x,y) — the cheap
+// path for ray marching (slopes are fetched once, at the hit point).
+func (o *Ocean) SampleH(x, y float64) float64 {
+	dx := o.bilinear(o.Dx, x, y)
+	dy := o.bilinear(o.Dy, x, y)
+	return o.bilinear(o.H, x-dx, y-dy)
+}
+
+// SlopeTail implements Surface.
+func (o *Ocean) SlopeTail() float64 { return o.SlopeVarTail }
+
+// ScaleAmp rescales the spectrum amplitude in place (used by Cascade for
+// global normalization); call Step afterwards to refresh the fields.
+func (o *Ocean) ScaleAmp(f float64) {
+	c := complex(f, 0)
+	for i := range o.h0 {
+		o.h0[i] *= c
+		o.h0mc[i] *= c
+	}
+	o.SlopeVarTail *= f * f
+	o.SlopeVarGrid *= f * f
 }
 
 // MaxAmp returns the current maximum |height| (used by the ray-marcher).
