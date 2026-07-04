@@ -1,0 +1,26 @@
+# A single declarative manifest spanning five package ecosystems.
+# `declpkg import examples/manifest.toml` loads this into the CRDT state.
+
+[packages.requests]
+ecosystem = "pip"
+version = ">=2.31,<3"
+
+[packages.numpy]
+ecosystem = "pip"
+
+[packages.left-pad]
+ecosystem = "npm"
+version = "1.3.0"
+
+[packages.serde]
+ecosystem = "cargo"
+version = "1.0"
+
+[packages.mathlib]
+ecosystem = "lake"
+source = "https://github.com/leanprover-community/mathlib4"
+version = "v4.7.0"
+
+[packages.aeson]
+ecosystem = "cabal"
+version = ">=2.2 && <2.3"
